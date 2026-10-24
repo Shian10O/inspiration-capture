@@ -1,0 +1,13 @@
+.env*
+!.env.example
+.dev.vars*
+.private/
+node_modules/
+dist/
+.wrangler/
+.sites-runtime/
+*.bundle
+*.zip
+*.log
+wrangler.json
+wrangler.jsonc

@@ -1,0 +1,79 @@
+// Keeps the validated vivo sidebar -> clipboard -> optional comment interaction.
+// Only a revocable capture credential is present. No Notion or platform service key.
+(function () {
+  var retryOnly = __RETRY_ONLY__;
+  var summaryMode = __SUMMARY_MODE__;
+  var auth, queue;
+  try {
+    auth = JSON.parse(getVariable('inspiration_cloud_auth'));
+    queue = JSON.parse(getVariable('inspiration_cloud_pending') || '[]');
+    if (!Array.isArray(queue) || !/^https:\/\/[a-zA-Z0-9.-]+\/api\/capture$/.test(auth.endpoint) || !/^[a-f0-9]{64}$/.test(auth.deviceToken)) throw Error('配置');
+  } catch (e) { showDialog('云端入口配置或待重试记录异常，未改动原记录。', '未提交'); return; }
+  function persist(items) {
+    try { setVariable('inspiration_cloud_pending', JSON.stringify(items)); return true; }
+    catch (e) { showDialog('本机待上传记录未能保存或更新，未清除旧记录。请保留原编号后重试。', '未上传／待确认'); return false; }
+  }
+  if (!retryOnly) {
+    var raw;
+    try { raw = getClipboardContent(); } catch (e) { raw = ''; }
+    if (!raw || !String(raw).trim()) raw = prompt('本次未读到剪贴板，可手动粘贴链接或文字。', '', {multiline:true});
+    if (raw === null) { abort(); return; }
+    raw = String(raw || '').trim();
+    if (!raw || raw.length > 8000) { showDialog('内容为空或超过手机入口 8000 字上限，本次未提交。', '未提交'); return; }
+    var match = raw.match(/https?:\/\/[^\s<>"\u201c\u201d]+/i);
+    var sourceUrl = match ? match[0] : '';
+    if (summaryMode) {
+      sourceUrl = prompt('追加点点已有总结：请粘贴原笔记链接，用于关联原记录。\n使用之前收集时的同一链接最稳妥。', '', {multiline:false});
+      if (sourceUrl === null) { abort(); return; }
+      var sourceMatch = String(sourceUrl).match(/https?:\/\/[^\s<>"\u201c\u201d]+/i);
+      if (!sourceMatch) { showDialog('缺少原笔记链接，未提交总结。', '未上传'); return; }
+      sourceUrl = sourceMatch[0];
+    }
+    var comment = prompt((summaryMode ? '补充这段点点已有总结？\n' + raw.slice(0,150) : '收下这条内容？\n' + (match ? match[0] : raw).slice(0,150)) + '\n\n我的一句话（可不填；确定后提交，取消不保存）', '', {multiline:true});
+    if (comment === null) { abort(); return; }
+    if (String(comment).length > 2000) { showDialog('评论超过手机入口 2000 字上限，本次未提交。', '未提交'); return; }
+    var item = {id:uuidv4(),raw:raw,url:sourceUrl,personalComment:String(comment),createdAt:new Date().toISOString(),isDiandian:summaryMode};
+    queue.push(item);
+    var draft = JSON.stringify(queue);
+    if (draft.length > 24000) { showDialog('本机待上传箱已满，未收下新内容，也未覆盖旧记录。请先重试待上传记录。', '未提交'); return; }
+    if (!persist(queue)) return;
+  }
+  if (!queue.length) { showToast('没有待重试的灵感'); return; }
+  var count = 0;
+  // Foreground only, bounded work. A retry reuses the original UUID and payload.
+  while (queue.length && count < 3) {
+    var p = queue[0], result = null, reply = null, packet = null, diagnostic = '未取得回执';
+    // Clear only the receipt, never the outbox. Match every returned receipt to
+    // the original event id before acknowledging a pending item.
+    try { setVariable('inspiration_cloud_receipt', ''); }
+    catch (e) { showDialog('回执修复组件尚未就绪，待上传记录未改动。请合并导入最新修复包。', '未上传／等待确认'); return; }
+    try {
+      result = executeShortcut('7f3d6a81-18dc-45f2-81a5-7b403b503861', {inspiration_request_token:auth.deviceToken,inspiration_request_body:JSON.stringify(p)});
+    } catch (e) { diagnostic = '请求助手未完整返回'; }
+    // HTTP Shortcuts 4.9: explicitly copy the response while the request's
+    // success/failure script is running, instead of relying on nested objects.
+    var candidates = [];
+    try { candidates.push(getVariable('inspiration_cloud_receipt')); } catch (e) {}
+    if (result && typeof result.result === 'string') candidates.push(result.result);
+    for (var i=0;i<candidates.length;i++) {
+      try { var candidate=JSON.parse(candidates[i]); if(candidate && candidate.v===1 && typeof candidate.body==='string') { packet=candidate;break; } } catch(e) {}
+    }
+    if (!packet && result && result.response) {
+      try { packet={v:1,statusCode:result.response.statusCode,body:result.response.body}; } catch(e) {}
+    }
+    if (packet) {
+      try { reply=JSON.parse(packet.body);diagnostic='HTTP '+Number(packet.statusCode); }
+      catch(e) { diagnostic='HTTP '+Number(packet.statusCode)+'，正文不是有效 JSON'; }
+    }
+    if (packet && Number(packet.statusCode) === 200 && reply && reply.ok === true && reply.state === 'synced' && reply.id === p.id && typeof reply.pageId === 'string' && reply.pageId) {
+      var remaining = queue.slice(1);
+      if (!persist(remaining)) return;
+      queue = remaining;
+      count++;
+    } else {
+      showDialog((reply && reply.message ? reply.message : '网络中断或未收到有效回执，尚未确认写入 Notion。') + '\n\n未上传／待确认：' + queue.length + ' 条，均已保存在本机。请使用“重试待上传灵感”；沿用原编号核对。\n当前编号：' + p.id + '\n本次已确认上传 ' + count + ' 条。\n回执检查 v2：' + diagnostic, '未上传／等待确认');
+      return;
+    }
+  }
+  showToast('已上传到 Notion：' + count + ' 条' + (queue.length ? '；还有 ' + queue.length + ' 条未上传，请重试' : ''));
+})();
